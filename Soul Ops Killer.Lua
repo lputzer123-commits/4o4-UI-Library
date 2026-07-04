@@ -11,7 +11,6 @@ local Window = UILibrary.new({
 })
 
 local MainTab = Window:CreateTab("Main")
-local _general = MainTab:CreateSection("General")
 
 local autoKillBosses = false
 
@@ -27,41 +26,8 @@ local function killBoss()
     _hum.Health = 0
 
 end
-
-local function toggleKillBosses(toggle: Bool)
-    if toggle == true then
-         print("Turned Toggle On")
-        task.spawn(function()
-            if autokillbosses ~= true then return end
-
-            local boss = bosses:FindFirstChildOfClass("Model")
-            if not boss then return end
-
-            local _hum = boss:FindFirstChildOfClass("Humanoid")
-            if not _hum then return end
-
-            _hum.Health = 0
-
-            task.wait(0.1)
-        end)
-    elseif toggle == false then
-        print("Turned Toggle Off")
-    end
-end
     
 
 _general:CreateButton("Kill Boss", function()
     killBoss()
 end)
-
-_general:CreateToggle("Toggle Kill Boss", false, function()
-    if autoKillBosses == true then
-        autoKillBosses = false
-        toggleKillBosses(false)
-    elseif autoKillBosses == false then
-        autoKillBosses = true
-        toggleKillBosses(true)
-    end 
-end)
-
-Window:CreateVersionTab()
