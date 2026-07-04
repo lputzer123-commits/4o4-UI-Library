@@ -1,0 +1,11 @@
+FEATURES
+	  - Sidebar tabs (+ expandable/collapsible tab groups)
+	  - Collapsible sections inside each tab
+	  - Buttons, Toggles, Dropdowns (with search), Labels
+	  - Theming: Primary / Secondary / Text colors + Font, live-updatable
+	  - Draggable window
+	  - Minimize -> pill button docked at bottom-middle of the screen
+	  - Close button that Destroys the whole gui
+	  - Built-in "Statistics" tab (server/client stats)
+	  - Built-in "Version" tab (checks the place is running the newest version)
+	  - Animations everywhere (hover, press, expand/collapse, open/close, minimize)
