@@ -1,5 +1,4 @@
 local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Stats = game:GetService("Stats")
@@ -37,32 +36,44 @@ local function PopIn(inst, time)
 	Tween(scale, { Scale = 1 }, time or 0.18, Enum.EasingStyle.Back)
 end
 
-local function MakeDraggable(dragHandle, target)
-	local dragging = false
-	local dragStart, startPos
+-- Makes `target` draggable by clicking/touching `handle`.
+--
+-- A UIDragDetector always drags whatever GuiObject it is parented under - it has
+-- no built-in concept of "drag this handle but move that other frame". So we set
+-- DragStyle to Scriptable and hand it a function that always returns nil (meaning
+-- "don't move the handle yourself"), then read the detector's DragUDim2 (the
+-- cumulative drag offset) each frame and apply it to `target` ourselves. This is
+-- the standard trick for "drag the window by its titlebar" with this API.
+local function MakeDraggable(handle, target)
+	local Detector = Create("UIDragDetector", {
+		DragStyle = Enum.UIDragDetectorDragStyle.Scriptable,
+		Parent = handle,
+	})
 
-	dragHandle.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = target.Position
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
-			end)
-		end
+	Detector:SetDragStyleFunction(function()
+		return nil -- prevent the detector from moving `handle` on its own
 	end)
 
-	dragHandle.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - dragStart
-			target.Position = UDim2.new(
-				startPos.X.Scale, startPos.X.Offset + delta.X,
-				startPos.Y.Scale, startPos.Y.Offset + delta.Y
-			)
-		end
+	local startPos
+
+	Detector.DragStart:Connect(function()
+		startPos = target.Position
 	end)
+
+	Detector.DragContinue:Connect(function()
+		if not startPos then return end
+		local offset = Detector.DragUDim2
+		target.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + offset.X.Offset,
+			startPos.Y.Scale, startPos.Y.Offset + offset.Y.Offset
+		)
+	end)
+
+	Detector.DragEnd:Connect(function()
+		startPos = nil
+	end)
+
+	return Detector
 end
 
 --============================================================
@@ -91,7 +102,19 @@ function Library.new(config)
 	-- Theme registry: instances that should update live when SetXColor/SetFont is called
 	self._Theme = { Primary = {}, Secondary = {}, Text = {}, Font = {} }
 
+	-- Connections that need to be cleaned up when the GUI is destroyed
+	self._Connections = {}
+
 	self:_Build()
+
+	-- Auto-build the Statistics tab last. task.defer runs after the current
+	-- resumption cycle finishes - i.e. after your setup script (which creates all
+	-- your other tabs/groups/game-detector synchronously) has finished running.
+	-- That guarantees Statistics always ends up as the final tab in the sidebar
+	-- without you ever having to call CreateStatsTab() yourself.
+	task.defer(function()
+		self:CreateStatsTab()
+	end)
 
 	return self
 end
@@ -235,6 +258,7 @@ function Library:_Build()
 		btn.MouseLeave:Connect(function() Tween(btn, { BackgroundColor3 = self.SecondaryColor }, 0.15) end)
 	end
 
+	-- TopBar is the drag handle; dragging it moves Main.
 	MakeDraggable(TopBar, Main)
 
 	CloseBtn.MouseButton1Click:Connect(function() self:Destroy() end)
@@ -335,6 +359,11 @@ function Library:Restore()
 end
 
 function Library:Destroy()
+	for _, conn in ipairs(self._Connections) do
+		pcall(function() conn:Disconnect() end)
+	end
+	table.clear(self._Connections)
+
 	if self.ScreenGui then
 		self.ScreenGui:Destroy()
 	end
@@ -388,11 +417,11 @@ function Library:_SelectTab(tabObj)
 	Tween(tabObj.Button, { BackgroundColor3 = self.AccentColor }, 0.15)
 end
 
--- Creates a top-level (ungrouped) tab
-function Library:CreateTab(name, order)
-	local Btn, Label = self:_CreateSidebarButton(self.Sidebar, name, 0)
-	Btn.LayoutOrder = order or (#self.Tabs + 1)
-
+-- Creates the ScrollingFrame + layout that backs a Tab's page. Elements created
+-- via Tab:CreateX are parented straight into this - there is no intermediate
+-- "Section" anymore, so the UIListLayout + AutomaticCanvasSize handle all sizing
+-- automatically (including while things like dropdowns are mid-tween).
+function Library:_CreatePage()
 	local Page = Create("ScrollingFrame", {
 		Visible = false,
 		Size = UDim2.new(1, 0, 1, 0),
@@ -403,19 +432,27 @@ function Library:CreateTab(name, order)
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		Parent = self.Content,
 	})
-	Create("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = Page })
+	Create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = Page })
 	Create("UIPadding", {
 		PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10),
 		PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
 		Parent = Page,
 	})
+	return Page
+end
+
+-- Creates a top-level (ungrouped) tab
+function Library:CreateTab(name, order)
+	local Btn, Label = self:_CreateSidebarButton(self.Sidebar, name, 0)
+	Btn.LayoutOrder = order or (#self.Tabs + 1)
+
+	local Page = self:_CreatePage()
 
 	local tabObj = setmetatable({
 		_lib = self,
 		Name = name,
 		Button = Btn,
 		Page = Page,
-		Sections = {},
 	}, Tab)
 
 	Btn.MouseEnter:Connect(function()
@@ -458,7 +495,7 @@ function Library:CreateTabGroup(name)
 	Create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = SubHolder })
 
 	local expanded = false
-	local group = { Tabs = {} }
+	local group = { Tabs = {}, _libRef = self }
 
 	local function relayout()
 		local h = 0
@@ -480,32 +517,16 @@ function Library:CreateTabGroup(name)
 	GroupHeader.MouseLeave:Connect(function() Tween(GroupHeader, { BackgroundColor3 = self.PrimaryColor }, 0.15) end)
 
 	function group:CreateTab(tabName)
-		local libSelf = group._libRef
+		local libSelf = self._libRef
 		local Btn, Label = libSelf:_CreateSidebarButton(SubHolder, tabName, 16)
 
-		local Page = Create("ScrollingFrame", {
-			Visible = false,
-			Size = UDim2.new(1, 0, 1, 0),
-			BackgroundTransparency = 1,
-			BorderSizePixel = 0,
-			ScrollBarThickness = 3,
-			CanvasSize = UDim2.new(0, 0, 0, 0),
-			AutomaticCanvasSize = Enum.AutomaticSize.Y,
-			Parent = libSelf.Content,
-		})
-		Create("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = Page })
-		Create("UIPadding", {
-			PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10),
-			PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
-			Parent = Page,
-		})
+		local Page = libSelf:_CreatePage()
 
 		local tabObj = setmetatable({
 			_lib = libSelf,
 			Name = tabName,
 			Button = Btn,
 			Page = Page,
-			Sections = {},
 		}, Tab)
 
 		Btn.MouseEnter:Connect(function()
@@ -517,127 +538,22 @@ function Library:CreateTabGroup(name)
 		Btn.MouseButton1Click:Connect(function() libSelf:_SelectTab(tabObj) end)
 
 		table.insert(libSelf.Tabs, tabObj)
-		table.insert(group.Tabs, tabObj)
+		table.insert(self.Tabs, tabObj)
 		if not libSelf.ActiveTab then libSelf:_SelectTab(tabObj) end
 		relayout()
 
 		return tabObj
 	end
 
-	group._libRef = self
 	return group
 end
 
 --============================================================
--- SECTIONS (collapsible, live inside a Tab page)
---============================================================
-
-local Section = {}
-Section.__index = Section
-
-function Tab:CreateSection(name)
-	local lib = self._lib
-
-	local Holder = Create("Frame", {
-		BackgroundColor3 = lib.PrimaryColor,
-		BorderSizePixel = 0,
-		Size = UDim2.new(1, 0, 0, 36),
-		AutomaticSize = Enum.AutomaticSize.None,
-		Parent = self.Page,
-	}, { Create("UICorner", { CornerRadius = UDim.new(0, 8) }) })
-	lib:_Reg("Primary", Holder, "BackgroundColor3")
-
-	local Header = Create("TextButton", {
-		Text = "",
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, 36),
-		AutoButtonColor = false,
-		Parent = Holder,
-	})
-
-	local HLabel = Create("TextLabel", {
-		Text = name,
-		Font = lib.Font,
-		TextSize = 14,
-		TextColor3 = lib.TextColor,
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, -34, 1, 0),
-		Position = UDim2.fromOffset(12, 0),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = Header,
-	})
-	lib:_Reg("Text", HLabel, "TextColor3")
-	lib:_Reg("Font", HLabel, "Font")
-
-	local Arrow = Create("TextLabel", {
-		Text = "▾",
-		Font = lib.Font,
-		TextSize = 14,
-		TextColor3 = lib.TextColor,
-		BackgroundTransparency = 1,
-		Size = UDim2.fromOffset(24, 36),
-		Position = UDim2.new(1, -30, 0, 0),
-		Parent = Header,
-	})
-	lib:_Reg("Text", Arrow, "TextColor3")
-
-	local Body = Create("Frame", {
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, 0),
-		Position = UDim2.fromOffset(0, 36),
-		Parent = Holder,
-	})
-	Create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = Body })
-	Create("UIPadding", {
-		PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
-		Parent = Body,
-	})
-
-	local expanded = true
-
-	local sectionObj = setmetatable({ _lib = lib, Body = Body, Elements = {} }, Section)
-
-	local function refreshHeight()
-		local contentH = 0
-		local layout = Body:FindFirstChildOfClass("UIListLayout")
-		for _, c in ipairs(Body:GetChildren()) do
-			if c:IsA("GuiObject") then contentH += c.AbsoluteSize.Y + layout.Padding.Offset end
-		end
-		contentH += 8 -- bottom padding
-		local target = expanded and (36 + contentH) or 36
-		Tween(Holder, { Size = UDim2.new(1, 0, 0, target) }, 0.22)
-	end
-	sectionObj._refresh = refreshHeight
-
-	Header.MouseButton1Click:Connect(function()
-		expanded = not expanded
-		Tween(Arrow, { Rotation = expanded and 0 or -90 }, 0.2)
-		refreshHeight()
-	end)
-
-	task.defer(refreshHeight)
-	table.insert(self.Sections, sectionObj)
-	return sectionObj
-end
-
--- convenience: tabs get a default section so simple UIs need zero boilerplate
-function Tab:_Default()
-	if not self._defaultSection then
-		self._defaultSection = self:CreateSection("General")
-	end
-	return self._defaultSection
-end
-
-function Tab:CreateButton(...) return self:_Default():CreateButton(...) end
-function Tab:CreateToggle(...) return self:_Default():CreateToggle(...) end
-function Tab:CreateDropdown(...) return self:_Default():CreateDropdown(...) end
-function Tab:CreateLabel(...) return self:_Default():CreateLabel(...) end
-
---============================================================
 -- ELEMENTS
+-- (parented directly onto Tab.Page - no Section wrapper anymore)
 --============================================================
 
-function Section:CreateLabel(text)
+function Tab:CreateLabel(text)
 	local lib = self._lib
 	local Lbl = Create("TextLabel", {
 		Text = text,
@@ -649,15 +565,14 @@ function Section:CreateLabel(text)
 		BackgroundTransparency = 1,
 		Size = UDim2.new(1, 0, 0, 20),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		Parent = self.Body,
+		Parent = self.Page,
 	})
 	lib:_Reg("Text", Lbl, "TextColor3")
 	lib:_Reg("Font", Lbl, "Font")
-	task.defer(self._refresh)
 	return Lbl
 end
 
-function Section:CreateButton(text, callback)
+function Tab:CreateButton(text, callback)
 	local lib = self._lib
 	callback = callback or function() end
 
@@ -666,7 +581,7 @@ function Section:CreateButton(text, callback)
 		BackgroundColor3 = lib.SecondaryColor,
 		AutoButtonColor = false,
 		Size = UDim2.new(1, 0, 0, 32),
-		Parent = self.Body,
+		Parent = self.Page,
 	}, { Create("UICorner", { CornerRadius = UDim.new(0, 6) }) })
 	lib:_Reg("Secondary", Btn, "BackgroundColor3")
 
@@ -694,11 +609,10 @@ function Section:CreateButton(text, callback)
 		if not ok then warn("[UILibrary] Button callback error: " .. tostring(err)) end
 	end)
 
-	task.defer(self._refresh)
 	return Btn
 end
 
-function Section:CreateToggle(text, default, callback)
+function Tab:CreateToggle(text, default, callback)
 	local lib = self._lib
 	default = default or false
 	callback = callback or function() end
@@ -706,7 +620,7 @@ function Section:CreateToggle(text, default, callback)
 	local Holder = Create("Frame", {
 		BackgroundColor3 = lib.SecondaryColor,
 		Size = UDim2.new(1, 0, 0, 32),
-		Parent = self.Body,
+		Parent = self.Page,
 	}, { Create("UICorner", { CornerRadius = UDim.new(0, 6) }) })
 	lib:_Reg("Secondary", Holder, "BackgroundColor3")
 
@@ -768,20 +682,23 @@ function Section:CreateToggle(text, default, callback)
 	end
 	function toggleObj:Get() return state end
 
-	task.defer(self._refresh)
 	return toggleObj
 end
 
-function Section:CreateDropdown(text, options, default, callback)
+function Tab:CreateDropdown(text, options, default, callback)
 	local lib = self._lib
 	options = options or {}
 	callback = callback or function() end
 
+	-- Holder starts collapsed (32px) and clips its own contents. Because it's a
+	-- direct child of Page's UIListLayout, growing/shrinking Holder automatically
+	-- pushes every element below it up/down in real time - even mid-tween - with
+	-- no manual refresh calls needed.
 	local Holder = Create("Frame", {
 		BackgroundColor3 = lib.SecondaryColor,
 		Size = UDim2.new(1, 0, 0, 32),
 		ClipsDescendants = true,
-		Parent = self.Body,
+		Parent = self.Page,
 	}, { Create("UICorner", { CornerRadius = UDim.new(0, 6) }) })
 	lib:_Reg("Secondary", Holder, "BackgroundColor3")
 
@@ -865,9 +782,15 @@ function Section:CreateDropdown(text, options, default, callback)
 
 	local function setSelected(value)
 		selectedValue = value
-		Selected.Text = value
+		Selected.Text = tostring(value)
 	end
 	if default then setSelected(default) end
+
+	local function collapse()
+		expanded = false
+		Tween(Holder, { Size = UDim2.new(1, 0, 0, 32) }, 0.22)
+		Tween(Arrow, { Rotation = 0 }, 0.22)
+	end
 
 	local function buildOptions(list)
 		for _, b in ipairs(optionButtons) do b:Destroy() end
@@ -895,9 +818,7 @@ function Section:CreateDropdown(text, options, default, callback)
 				setSelected(opt)
 				local ok, err = pcall(callback, opt)
 				if not ok then warn("[UILibrary] Dropdown callback error: " .. tostring(err)) end
-				expanded = false
-				Tween(Holder, { Size = UDim2.new(1, 0, 0, 32) }, 0.2)
-				Tween(Arrow, { Rotation = 0 }, 0.2)
+				collapse()
 			end)
 
 			table.insert(optionButtons, OptBtn)
@@ -921,15 +842,13 @@ function Section:CreateDropdown(text, options, default, callback)
 	end)
 
 	Header.MouseButton1Click:Connect(function()
-		expanded = not expanded
 		if expanded then
+			collapse()
+		else
+			expanded = true
 			Tween(Holder, { Size = UDim2.new(1, 0, 0, 32 + 150) }, 0.22)
 			Tween(Arrow, { Rotation = 180 }, 0.22)
-		else
-			Tween(Holder, { Size = UDim2.new(1, 0, 0, 32) }, 0.22)
-			Tween(Arrow, { Rotation = 0 }, 0.22)
 		end
-		task.defer(self._refresh)
 	end)
 
 	local dropdownObj = {}
@@ -940,24 +859,24 @@ function Section:CreateDropdown(text, options, default, callback)
 		buildOptions(options)
 	end
 
-	task.defer(self._refresh)
 	return dropdownObj
 end
 
 --============================================================
 -- BUILT-IN TAB: Server / Client statistics
 --============================================================
+-- You don't need to call this yourself - Library.new() schedules it
+-- automatically so it always ends up as the last tab in the sidebar.
 
 function Library:CreateStatsTab()
 	local tab = self:CreateTab("Statistics")
-	local sec = tab:CreateSection("Live Stats")
 
-	local pingLabel = sec:CreateLabel("Ping: -- ms")
-	local fpsLabel = sec:CreateLabel("FPS: --")
-	local memLabel = sec:CreateLabel("Memory: -- MB")
-	local playersLabel = sec:CreateLabel("Players: -- / --")
-	local sendLabel = sec:CreateLabel("Data Sent: -- kb/s")
-	local recvLabel = sec:CreateLabel("Data Received: -- kb/s")
+	local pingLabel = tab:CreateLabel("Ping: -- ms")
+	local fpsLabel = tab:CreateLabel("FPS: --")
+	local memLabel = tab:CreateLabel("Memory: -- MB")
+	local playersLabel = tab:CreateLabel("Players: -- / --")
+	local sendLabel = tab:CreateLabel("Data Sent: -- kb/s")
+	local recvLabel = tab:CreateLabel("Data Received: -- kb/s")
 
 	local frames = 0
 	local lastClock = os.clock()
@@ -972,11 +891,11 @@ function Library:CreateStatsTab()
 			lastClock = now
 		end
 	end)
+	table.insert(self._Connections, heartbeatConn)
 
-	local updateConn = RunService.Heartbeat:Connect(function() end)
 	task.spawn(function()
 		while tab.Page and tab.Page.Parent do
-			local ok = pcall(function()
+			pcall(function()
 				local pingMs = 0
 				local net = Stats.Network
 				pcall(function()
@@ -996,7 +915,6 @@ function Library:CreateStatsTab()
 				end)
 			end)
 			task.wait(1)
-			if not ok then task.wait(1) end
 		end
 	end)
 
@@ -1013,12 +931,11 @@ end
 function Library:CreateVersionTab(opts)
 	opts = opts or {}
 	local tab = self:CreateTab("Version")
-	local sec = tab:CreateSection("Build Info")
 
-	local currentLabel = sec:CreateLabel("Current Version: " .. tostring(opts.CurrentVersion or "unknown"))
-	local statusLabel = sec:CreateLabel("Checking for updates...")
+	local currentLabel = tab:CreateLabel("Current Version: " .. tostring(opts.CurrentVersion or "unknown"))
+	local statusLabel = tab:CreateLabel("Checking for updates...")
 
-	sec:CreateButton("Check Now", function()
+	tab:CreateButton("Check Now", function()
 		statusLabel.Text = "Checking for updates..."
 		task.spawn(function()
 			local latest
@@ -1054,6 +971,77 @@ function Library:CreateVersionTab(opts)
 	end
 
 	return tab
+end
+
+--============================================================
+-- GAME DETECTOR
+--============================================================
+-- Lets you ship one GUI with per-game scripts baked in. Pass a table keyed by
+-- PlaceId, where each value is either:
+--   * a function(Library) ...          -- called directly, build whatever you want
+--   * a ModuleScript                   -- require()'d; if it returns a function,
+--                                          that function is called with (Library);
+--                                          if it returns a table with an Init
+--                                          function, Init(Library) is called
+--
+-- Example:
+--   Library:CreateGameDetector({
+--       [606849621] = function(Lib)
+--           local tab = Lib:CreateTab("Game")
+--           tab:CreateButton("Do the thing", function() ... end)
+--       end,
+--       [920587237] = script.Games.SomeOtherGame, -- a ModuleScript
+--   })
+--
+-- opts.ShowWarning (default true)  -- if no script matches this PlaceId (or the
+--                                       matching script errors), drop a warning
+--                                       label into the GUI instead of doing
+--                                       nothing. Set to false to just stay blank.
+-- opts.TabName (default "Game")    -- name of the tab used to show that warning
+
+function Library:CreateGameDetector(games, opts)
+	games = games or {}
+	opts = opts or {}
+	local showWarning = opts.ShowWarning
+	if showWarning == nil then showWarning = true end
+	local tabName = opts.TabName or "Game"
+
+	local placeId = game.PlaceId
+	local entry = games[placeId] or games[tostring(placeId)]
+
+	local function warnInGui(message)
+		if not showWarning then return end
+		local tab = self:CreateTab(tabName)
+		tab:CreateLabel("⚠️ " .. message)
+	end
+
+	if entry == nil then
+		warn("[UILibrary] GameDetector: no script registered for PlaceId " .. tostring(placeId))
+		warnInGui("No script found for this game.\nPlaceId: " .. tostring(placeId))
+		return
+	end
+
+	local ok, err = pcall(function()
+		if typeof(entry) == "function" then
+			entry(self)
+		elseif typeof(entry) == "Instance" and entry:IsA("ModuleScript") then
+			local mod = require(entry)
+			if type(mod) == "function" then
+				mod(self)
+			elseif type(mod) == "table" and type(mod.Init) == "function" then
+				mod.Init(self)
+			else
+				error("ModuleScript for PlaceId " .. tostring(placeId) .. " must return a function or a table with an Init function")
+			end
+		else
+			error("Unsupported game script type for PlaceId " .. tostring(placeId) .. ": " .. typeof(entry))
+		end
+	end)
+
+	if not ok then
+		warn("[UILibrary] GameDetector: script for PlaceId " .. tostring(placeId) .. " errored: " .. tostring(err))
+		warnInGui("The script for this game failed to load:\n" .. tostring(err))
+	end
 end
 
 return Library
